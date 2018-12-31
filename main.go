@@ -30,7 +30,9 @@ func init() {
 	// Ensure the store folder is on disk
 	storePath = filepath.Join(home, ".config/nsort")
 	if _, err := os.Stat(storePath); err != nil {
-		os.MkdirAll(storePath, 0755)
+		if err := os.MkdirAll(storePath, 0755); err != nil {
+			log.Fatalf("could not create path `%s`: %v", storePath, err)
+		}
 
 	}
 
@@ -42,7 +44,9 @@ func init() {
 
 	// if we just created the store, throw in the default mappings
 	for ext, dir := range defaultMappings {
-		store.Put(ext, dir)
+		if err := store.Put(ext, dir); err != nil {
+			log.Fatalf("could not store mapping: %v", err)
+		}
 	}
 }
 
@@ -51,6 +55,9 @@ func main() {
 	mapping := flag.String("map", "", "nsort -map go:Source")
 	del := flag.String("del", "", "nsort -del go:Source")
 	update := flag.String("upd", "", "nsort -upd go:Source")
+
+	var bykind bool
+	flag.BoolVar(&bykind, "by-kind", false, "-by-kind")
 	flag.Parse()
 
 	Safeguard(targetDirectory)
@@ -83,7 +90,12 @@ func main() {
 		return
 	}
 
-	sort(targetDirectory)
+	switch bykind {
+	case true:
+		sortbykind(targetDirectory)
+	default:
+		sort(targetDirectory)
+	}
 }
 
 type mapping struct {
@@ -150,6 +162,39 @@ func addMapping(mapFlag string) error {
 	return nil
 }
 
+func sortbykind(target string) {
+	files, err := ioutil.ReadDir(target)
+	if err != nil {
+		log.Fatalf("could not read directory %q: %v", target, err)
+	}
+
+	for _, file := range files {
+		ext := filepath.Ext(file.Name())
+		// ignore: files without extensions & directories
+		if file.Name() == ext || file.IsDir() {
+			continue
+		}
+		// remove dot from extension & make a title
+		ext = strings.TrimPrefix(ext, ".")
+
+		// Find or create a directory for this extension mapping
+		path := filepath.Join(targetDirectory, ext)
+		if _, err := os.Stat(path); err != nil {
+			if err := os.MkdirAll(path, 0755); err != nil {
+				log.Fatalf("could not store path `%s`: %v", path, err)
+			}
+		}
+
+		// Move the file into the corresponding directory
+		oldPath := filepath.Join(targetDirectory, file.Name())
+		newPath := filepath.Join(path, file.Name())
+
+		if err := os.Rename(oldPath, newPath); err != nil {
+			log.Printf("could not move file %s into directory %s", file.Name(), ext)
+		}
+	}
+}
+
 // sort borrows heavily from it's forefather sortdir
 // but in many ways is cleaner and less confusing
 func sort(target string) {
@@ -181,7 +226,9 @@ func sort(target string) {
 		// Find or create a directory for this extension mapping
 		path := filepath.Join(targetDirectory, kind)
 		if _, err := os.Stat(path); err != nil {
-			os.MkdirAll(path, 0755)
+			if err := os.MkdirAll(path, 0755); err != nil {
+				log.Fatalf("could not store path `%s`: %v", path, err)
+			}
 		}
 
 		// Move the file into the corresponding directory
