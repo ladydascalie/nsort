@@ -3,86 +3,81 @@ package main
 import (
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/user"
 	"path/filepath"
 	"strings"
-
-	"github.com/rapidloop/skv"
 )
 
-var (
-	targetDirectory string
-	storePath       string
-	store           *skv.KVStore
-	home            string
-)
-
-func init() {
+func setupStorage() (storePath string) {
 	u, err := user.Current()
 	if err != nil {
 		log.Fatalln(err)
 	}
-	home = u.HomeDir
+	home := u.HomeDir
 
 	// Ensure the store folder is on disk
 	storePath = filepath.Join(home, ".config/nsort")
 	if _, err := os.Stat(storePath); err != nil {
-		if err := os.MkdirAll(storePath, 0755); err != nil {
+		if err := os.MkdirAll(storePath, 0o755); err != nil {
 			log.Fatalf("could not create path `%s`: %v", storePath, err)
 		}
-
 	}
 
-	// Open the store
-	store, err = skv.Open(storePath + "/mappings.db")
-	if err != nil {
-		log.Fatalln(err)
-	}
+	return storePath
+}
 
-	// if we just created the store, throw in the default mappings
-	for ext, dir := range defaultMappings {
-		if err := store.Put(ext, dir); err != nil {
-			log.Fatalf("could not store mapping: %v", err)
-		}
-	}
+type Storage interface {
+	IsMapped(m mapping) (bool, string)
+	AddMapping(flag string) error
+	DeleteMapping(flag string) error
+	GetMapping(ext string) string
 }
 
 func main() {
+	var (
+		targetDirectory string
+		mapping         string
+		del             string
+		update          string
+	)
+
 	flag.StringVar(&targetDirectory, "t", ".", "nsort -t dir/")
-	mapping := flag.String("map", "", "nsort -map go:Source")
-	del := flag.String("del", "", "nsort -del go:Source")
-	update := flag.String("upd", "", "nsort -upd go:Source")
+	flag.StringVar(&mapping, "map", "", "nsort -map go:Source")
+	flag.StringVar(&del, "del", "", "nsort -del go:Source")
+	flag.StringVar(&update, "upd", "", "nsort -upd go:Source")
 
 	var bykind bool
 	flag.BoolVar(&bykind, "by-kind", false, "-by-kind")
 	flag.Parse()
 
-	Safeguard(targetDirectory)
+	storePath := setupStorage()
+	safeguard(targetDirectory)
+
+	store := NewJSONStorage(storePath)
 
 	switch {
-	case *mapping != "":
-		if err := addMapping(*mapping); err != nil {
+	case mapping != "":
+		if err := store.AddMapping(mapping); err != nil {
 			fmt.Println(err)
 			return
 		}
 		fmt.Println("Successfully added mapping")
 		return
-	case *del != "":
-		if err := delMapping(*del); err != nil {
+	case del != "":
+		if err := store.DeleteMapping(del); err != nil {
 			fmt.Println(err)
 			return
 		}
 		fmt.Println("Deleted mapping")
 		return
-	case *update != "":
-		if err := delMapping(*update); err != nil {
+	case update != "":
+		if err := store.DeleteMapping(update); err != nil {
 			fmt.Println(err)
 			return
 		}
-		if err := addMapping(*update); err != nil {
+		if err := store.AddMapping(update); err != nil {
 			fmt.Println(err)
 			return
 		}
@@ -92,9 +87,9 @@ func main() {
 
 	switch bykind {
 	case true:
-		sortbykind(targetDirectory)
+		sortByKind(targetDirectory)
 	default:
-		sort(targetDirectory)
+		sort(targetDirectory, store)
 	}
 }
 
@@ -109,9 +104,9 @@ func (m *mapping) Unpack(mapFlag string) {
 	m.Folder = sl[1]
 }
 
-// Safeguard provides basic security by preventing sortdir from running
+// safeguard provides basic security by preventing sortdir from running
 // on the user's home directory.
-func Safeguard(dir string) {
+func safeguard(dir string) {
 	pwd, err := os.Getwd()
 	if err != nil {
 		log.Fatalf("error getting pwd: %v", err)
@@ -130,40 +125,8 @@ func Safeguard(dir string) {
 	}
 }
 
-func isMapped(mapping mapping) (bool, string) {
-	var kind string
-	if err := store.Get(mapping.Ext, &kind); err == nil {
-		return true, kind
-	}
-	return false, kind
-}
-
-func delMapping(mapFlag string) error {
-	var m mapping
-	m.Unpack(mapFlag)
-	if err := store.Delete(m.Ext); err != nil {
-		return err
-	}
-	return nil
-}
-
-func addMapping(mapFlag string) error {
-	var m mapping
-	m.Unpack(mapFlag)
-	ok, kind := isMapped(m)
-	if ok {
-		return fmt.Errorf("[ %s ] already mapped to [ %s ]", m.Ext, kind)
-	}
-
-	if err := store.Put(m.Ext, m.Folder); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func sortbykind(target string) {
-	files, err := ioutil.ReadDir(target)
+func sortByKind(target string) {
+	files, err := os.ReadDir(target)
 	if err != nil {
 		log.Fatalf("could not read directory %q: %v", target, err)
 	}
@@ -178,15 +141,15 @@ func sortbykind(target string) {
 		ext = strings.TrimPrefix(ext, ".")
 
 		// Find or create a directory for this extension mapping
-		path := filepath.Join(targetDirectory, ext)
+		path := filepath.Join(target, ext)
 		if _, err := os.Stat(path); err != nil {
-			if err := os.MkdirAll(path, 0755); err != nil {
+			if err := os.MkdirAll(path, 0o755); err != nil {
 				log.Fatalf("could not store path `%s`: %v", path, err)
 			}
 		}
 
 		// Move the file into the corresponding directory
-		oldPath := filepath.Join(targetDirectory, file.Name())
+		oldPath := filepath.Join(target, file.Name())
 		newPath := filepath.Join(path, file.Name())
 
 		if err := os.Rename(oldPath, newPath); err != nil {
@@ -197,9 +160,9 @@ func sortbykind(target string) {
 
 // sort borrows heavily from it's forefather sortdir
 // but in many ways is cleaner and less confusing
-func sort(target string) {
+func sort(target string, store Storage) {
 	// list files within the target directory
-	files, err := ioutil.ReadDir(target)
+	files, err := os.ReadDir(target)
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -214,105 +177,28 @@ func sort(target string) {
 		if file.IsDir() {
 			continue
 		}
-		var kind string
 		// remove the dot from the extension
 		ext = strings.TrimPrefix(ext, ".")
 		// retrieve mapping for this extension, if it exists
-		if err := store.Get(ext, &kind); err != nil {
-			fmt.Printf("could not find mapping for: %s\n", file.Name())
-			continue
+		kind := store.GetMapping(ext)
+		if kind == "" {
+			kind = "Other"
 		}
 
 		// Find or create a directory for this extension mapping
-		path := filepath.Join(targetDirectory, kind)
+		path := filepath.Join(target, kind)
 		if _, err := os.Stat(path); err != nil {
-			if err := os.MkdirAll(path, 0755); err != nil {
+			if err := os.MkdirAll(path, 0o755); err != nil {
 				log.Fatalf("could not store path `%s`: %v", path, err)
 			}
 		}
 
 		// Move the file into the corresponding directory
-		oldPath := filepath.Join(targetDirectory, file.Name())
+		oldPath := filepath.Join(target, file.Name())
 		newPath := filepath.Join(path, file.Name())
 
 		if err := os.Rename(oldPath, newPath); err != nil {
 			log.Printf("could not move file %s into directory %s", file.Name(), kind)
 		}
 	}
-}
-
-var defaultMappings = map[string]string{
-	"mp3":  "Music",
-	"aac":  "Music",
-	"flac": "Music",
-	"ogg":  "Music",
-	"wma":  "Music",
-	"m4a":  "Music",
-	"aiff": "Music",
-	"wav":  "Music",
-	"amr":  "Music",
-	// Videos
-	"flv":  "Videos",
-	"ogv":  "Videos",
-	"avi":  "Videos",
-	"mp4":  "Videos",
-	"mpg":  "Videos",
-	"mpeg": "Videos",
-	"3gp":  "Videos",
-	"mkv":  "Videos",
-	"ts":   "Videos",
-	"webm": "Videos",
-	"vob":  "Videos",
-	"wmv":  "Videos",
-	// Pictures
-	"png":  "Pictures",
-	"jpeg": "Pictures",
-	"gif":  "Pictures",
-	"jpg":  "Pictures",
-	"bmp":  "Pictures",
-	"svg":  "Pictures",
-	"webp": "Pictures",
-	"psd":  "Pictures",
-	"tiff": "Pictures",
-	// Archives
-	"rar":  "Archives",
-	"zip":  "Archives",
-	"7z":   "Archives",
-	"gz":   "Archives",
-	"bz2":  "Archives",
-	"tar":  "Archives",
-	"dmg":  "Archives",
-	"tgz":  "Archives",
-	"xz":   "Archives",
-	"iso":  "Archives",
-	"cpio": "Archives",
-	// Documents
-	"txt":  "Documents",
-	"pdf":  "Documents",
-	"doc":  "Documents",
-	"docx": "Documents",
-	"odf":  "Documents",
-	"xls":  "Documents",
-	"xlsv": "Documents",
-	"xlsx": "Documents",
-	"ppt":  "Documents",
-	"pptx": "Documents",
-	"ppsx": "Documents",
-	"odp":  "Documents",
-	"odt":  "Documents",
-	"ods":  "Documents",
-	"md":   "Documents",
-	"json": "Documents",
-	"csv":  "Documents",
-	// Books
-	"mobi": "Books",
-	"epub": "Books",
-	"chm":  "Books",
-	// deb Packages
-	"deb": "DEBPackages",
-	// Programs
-	"exe": "Programs",
-	"msi": "Programs",
-	// RPM Packages
-	"rpm": "RPMPackages",
 }
